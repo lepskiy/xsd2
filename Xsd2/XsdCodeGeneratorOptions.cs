@@ -35,5 +35,13 @@ namespace Xsd2
         public bool ExcludeImportedTypesByNameAndNamespace { get; set; }
 
         public bool MixedContent { get; set; }
+
+        public XsdCodeGeneratorAutoPropertyType GenerateAutoProperty { get; set; }
+
+        public bool ExcludeEmptyComments { get; set; }
+
+        public bool RemoveSpecifiedProperties { get; set; }
+
+        public bool SetOriginalType { get; set; }
     }
 }

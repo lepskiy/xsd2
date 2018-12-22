@@ -55,13 +55,18 @@ namespace Xsd2
                     { "ein|exclude-imports-by-name", "Exclude imported types by name", s => options.ExcludeImportedTypes = options.ExcludeImportedTypesByNameAndNamespace = s != null },
                     { "nullable", "Use nullable types", s => options.UseNullableTypes = options.HideUnderlyingNullableProperties = s != null },
                     { "all", "Enable all flags", s =>
-                    {
-                        stripDebuggerStepThroughAttribute = options.UseLists = options.UseNullableTypes = options.ExcludeImportedTypes = options.MixedContent = s != null;
-                        options.PropertyNameCapitalizer = new FirstCharacterCapitalizer();
-                    } },
+                        {
+                            stripDebuggerStepThroughAttribute = options.UseLists = options.UseNullableTypes = options.ExcludeImportedTypes = options.MixedContent = s != null;
+                            options.PropertyNameCapitalizer = new FirstCharacterCapitalizer();
+                        } },
                     { "combine:", "Combine output to a single file", s => { combine = true; outputFileName = s; } },
                     { "c|classes", "Generates classes for the schema", s => { }, true },
                     { "nologo", "Suppresses application banner", s => { }, true },
+                    { "ap|auto-property:", "Generate auto-property instead of backing field. If VALUE=ctor then default value is assigned in constructor, if VALUE=inline then in the same line.",
+                        s => SetAutoPropertyOption(s, options) },
+                    { "eec|exclude-empty-comments", "Exclude empty comments (<remarks /> etc.)", s => options.ExcludeEmptyComments = s != null },
+                    { "rs|remove-specified-property", "Remove [PropertyName]Specified properties", s => options.RemoveSpecifiedProperties = s != null },
+                    { "sot|set-original-type", "Set property type to the data type, specified in XmlAttribute (DataType argument)", s => options.SetOriginalType = s != null },
                 };
 
                 var inputs = optionSet.Parse(args);
@@ -142,6 +147,23 @@ namespace Xsd2
             return 0;
         }
 
+        private static void SetAutoPropertyOption(string paramValue, XsdCodeGeneratorOptions options)
+        {
+            switch (paramValue?.ToLower())
+            {
+                case null:
+                case "inline":
+                    options.GenerateAutoProperty = XsdCodeGeneratorAutoPropertyType.AssignInline;
+                    break;
+                case "ctor":
+                    options.GenerateAutoProperty = XsdCodeGeneratorAutoPropertyType.AssignInConstructor;
+                    break;
+                default:
+                    options.GenerateAutoProperty = XsdCodeGeneratorAutoPropertyType.None;
+                    break;
+            }
+        }
+
         private static ICapitalizer GetCapitalizer(string name, string argument)
         {
             if (string.IsNullOrEmpty(name))
@@ -159,6 +181,10 @@ namespace Xsd2
                     if (!string.IsNullOrEmpty(argument))
                         return new WordCapitalizer(Convert.ToInt32(argument));
                     return new WordCapitalizer();
+                case "pascal":
+                    if (!string.IsNullOrEmpty(argument))
+                        return new PascalCapitalizer(Convert.ToInt32(argument));
+                    return new PascalCapitalizer();
             }
             
             throw new NotSupportedException(string.Format("There is no capitalizer associated with the name {0}", name));

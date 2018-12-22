@@ -143,18 +143,7 @@ namespace Xsd2
                 output.WriteLine();
             }
 
-            // output the C# code
-            CodeDomProvider codeProvider;
-            switch (Options.Language)
-            {
-                case XsdCodeGeneratorOutputLanguage.VB:
-                    codeProvider = new VBCodeProvider();
-                    break;
-                default:
-                    codeProvider = new CSharpCodeProvider();
-                    break;
-            }
-
+            var codeProvider = GetCodeDomProvider(Options.Language);
             codeProvider.GenerateCodeFromNamespace(codeNamespace, output, new CodeGeneratorOptions());
         }
 
@@ -294,6 +283,9 @@ namespace Xsd2
                         continue;
                     }
 
+                if (Options.ExcludeEmptyComments)
+                    codeType.Comments.Clear();
+
                 var attributesToRemove = new HashSet<CodeAttributeDeclaration>();
                 foreach (CodeAttributeDeclaration att in codeType.CustomAttributes)
                 {
@@ -325,24 +317,27 @@ namespace Xsd2
                 if (Options.TypeNameCapitalizer != null)
                 {
                     var newName = Options.TypeNameCapitalizer.Capitalize(codeNamespace, codeType);
+                    SetAttributeOriginalName(codeType, codeType.GetOriginalName(), "System.Xml.Serialization.XmlTypeAttribute");
                     if (newName != codeType.Name)
                     {
-                        SetAttributeOriginalName(codeType, codeType.GetOriginalName(), "System.Xml.Serialization.XmlTypeAttribute");
                         var newNameToAdd = newName;
                         var index = 0;
                         while (!newTypeNames.Add(newNameToAdd))
                         {
                             index += 1;
-                            newNameToAdd = string.Format("{0}{1}", newName, index);
+                            newNameToAdd = $"{newName}{index}";
                         }
                         changedTypeNames.Add(codeType.Name, newNameToAdd);
                         codeType.Name = newNameToAdd;
                     }
                 }
 
-                var members = new Dictionary<string, CodeTypeMember>();
-                foreach (CodeTypeMember member in codeType.Members)
-                    members[member.Name] = member;
+                SetOriginalPropertyType(codeType);
+                RemoveSpecifiedProperties(codeType);
+
+                var members = codeType.Members
+                    .OfType<CodeTypeMember>()
+                    .ToDictionary(ctm => ctm.Name, ctm => ctm);
 
                 if (Options.EnableDataBinding && codeType.IsClass && codeType.BaseTypes.Count == 0)
                 {
@@ -382,6 +377,9 @@ namespace Xsd2
                 var orderIndex = 0;
                 foreach (CodeTypeMember member in members.Values)
                 {
+                    if(Options.ExcludeEmptyComments)
+                        member.Comments.Clear();
+
                     if (member is CodeMemberField)
                     {
                         CodeMemberField field = (CodeMemberField)member;
@@ -415,11 +413,8 @@ namespace Xsd2
                         if (codeType.IsEnum && Options.EnumValueCapitalizer != null)
                         {
                             var newName = Options.EnumValueCapitalizer.Capitalize(codeNamespace, member);
-                            if (newName != member.Name)
-                            {
-                                SetAttributeOriginalName(member, member.GetOriginalName(), "System.Xml.Serialization.XmlEnumAttribute");
-                                member.Name = newName;
-                            }
+                            SetAttributeOriginalName(member, member.GetOriginalName(), "System.Xml.Serialization.XmlEnumAttribute");
+                            member.Name = newName;
                         }
                     }
 
@@ -574,11 +569,8 @@ namespace Xsd2
                         if (capitalizeProperty)
                         {
                             var newName = Options.PropertyNameCapitalizer.Capitalize(codeNamespace, property);
-                            if (newName != property.Name)
-                            {
-                                SetAttributeOriginalName(property, property.GetOriginalName(), "System.Xml.Serialization.XmlElementAttribute");
-                                property.Name = newName;
-                            }
+                            SetAttributeOriginalName(property, property.GetOriginalName(), "System.Xml.Serialization.XmlElementAttribute");
+                            property.Name = newName;
                         }
                     }
                 }
@@ -616,6 +608,11 @@ namespace Xsd2
                     }
                 }
             }
+
+            foreach (CodeTypeDeclaration codeType in codeNamespace.Types)
+            {
+                GenerateAutomaticProperties(codeType);
+            }
         }
 
         private static void FixAttributeTypeReference(IReadOnlyDictionary<string, string> changedTypeNames, CodeTypeMember member)
@@ -647,10 +644,12 @@ namespace Xsd2
             }
         }
 
-        private static void SetAttributeOriginalName(CodeTypeMember member, string originalName, string newAttributeType)
+        private static void SetAttributeOriginalName(CodeTypeMember member, string originalName,
+            string newAttributeType)
         {
             var elementIgnored = false;
             var attributesThatNeedName = new List<CodeAttributeDeclaration>();
+
             foreach (CodeAttributeDeclaration attribute in member.CustomAttributes)
             {
                 switch (attribute.Name)
@@ -679,7 +678,7 @@ namespace Xsd2
                 member.CustomAttributes.Add(attribute);
             }
 
-            var nameArgument = new CodeAttributeArgument { Name = "", Value = new CodePrimitiveExpression(originalName) };
+            var nameArgument = new CodeAttributeArgument {Name = "", Value = new CodePrimitiveExpression(originalName)};
 
             foreach (var attribute in attributesThatNeedName)
             {
@@ -689,17 +688,317 @@ namespace Xsd2
                         if (attribute.IsAnonymousTypeArgument())
                             continue;
                         break;
+                    case "System.Xml.Serialization.XmlArrayItemAttribute":
+                        SetXmlArrayAttribute(member, nameArgument);
+                        break;
                 }
 
-                var hasNameAttribute = attribute.Arguments.Cast<CodeAttributeArgument>().Any(x => x.IsNameArgument());
-                if (!hasNameAttribute)
+                var hasNameArgument = attribute.Arguments.Cast<CodeAttributeArgument>().Any(x => x.IsNameArgument());
+                if (!hasNameArgument)
                     attribute.Arguments.Insert(0, nameArgument);
+            }
+        }
+
+        private static void SetXmlArrayAttribute(CodeTypeMember member, CodeAttributeArgument nameArgument)
+        {
+            var arrayAttributeName = "System.Xml.Serialization.XmlArrayAttribute";
+            var arrayAttribute = member.CustomAttributes.OfType<CodeAttributeDeclaration>()
+                .FirstOrDefault(attr => attr.Name == arrayAttributeName);
+
+            if (arrayAttribute == null)
+            {
+                arrayAttribute = new CodeAttributeDeclaration(arrayAttributeName);
+                arrayAttribute.Arguments.Add(nameArgument);
+                member.CustomAttributes.Add(arrayAttribute);
+            }
+            else
+            {
+                var hasNameArgument = arrayAttribute.Arguments.Cast<CodeAttributeArgument>().Any(x => x.IsNameArgument());
+                if (!hasNameArgument)
+                    arrayAttribute.Arguments.Insert(0, nameArgument);
             }
         }
 
         private static string GetFieldName(string p, string suffix = null)
         {
             return p.Substring(0, 1).ToLower() + p.Substring(1) + suffix;
+        }
+
+        /// <summary>
+        /// Removes [PropertyName]Specified properties
+        /// </summary>
+        /// <param name="codeType"></param>
+        private void RemoveSpecifiedProperties(CodeTypeDeclaration codeType)
+        {
+            if (!Options.RemoveSpecifiedProperties)
+                return;
+
+            var fieldsDict = codeType.Members
+                .OfType<CodeMemberField>()
+                .ToDictionary(fld => fld.Name, fld => fld);
+
+            var propertiesDict = codeType.Members
+                .OfType<CodeMemberProperty>()
+                .ToDictionary(p => p.Name, p => p);
+
+            var specifiedPairs = propertiesDict.Values
+                .Where(p => p.Name.EndsWith("Specified"))
+                .Select(spec => (
+                    Property: propertiesDict.TryGetValue(spec.Name.Substring(0, spec.Name.Length - 9), out var prop)
+                        ? prop
+                        : null,
+                    Specified: spec))
+                .Where(p => p.Property != null)
+                .ToList();
+
+            foreach (var pair in specifiedPairs)
+            {
+                //if (Options.UseNullableTypes)
+                //{
+                //    pair.Property.Type = new CodeTypeReference(typeof(Nullable<>))
+                //    {
+                //        TypeArguments = {pair.Property.Type.BaseType}
+                //    };
+                //}
+
+                codeType.Members.Remove(pair.Specified);
+                var specifiedFieldName = GetPropertyFieldName(pair.Specified);
+                if(fieldsDict.TryGetValue(specifiedFieldName, out var specifiedField))
+                {
+                    codeType.Members.Remove(specifiedField);
+                }
+            }
+        }
+
+        private void SetOriginalPropertyType(CodeTypeDeclaration codeType)
+        {
+            if (!Options.SetOriginalType)
+                return;
+
+            var fieldsDict = codeType.Members
+                .OfType<CodeMemberField>()
+                .ToDictionary(fld => fld.Name, fld => fld);
+
+            var propertiesWithXmlAttribute = codeType.Members
+                .OfType<CodeMemberProperty>()
+                .Select(prop => (
+                    Property: prop,
+                    DataTypeAttribute: prop.CustomAttributes
+                        .OfType<CodeAttributeDeclaration>()
+                        .FirstOrDefault(attr => attr.Name == "System.Xml.Serialization.XmlAttributeAttribute")))
+                .Where(prop => prop.DataTypeAttribute != null)
+                .ToList();
+
+            foreach (var tuple in propertiesWithXmlAttribute)
+            {
+                var dataTypeArgument = tuple.DataTypeAttribute.Arguments
+                    .OfType<CodeAttributeArgument>()
+                    .FirstOrDefault(arg => arg.Name == "DataType");
+
+                if(dataTypeArgument == null)
+                    continue;
+
+                var dataType = ExpressionToString(dataTypeArgument.Value)?.Trim('"');
+
+                Type type = null;
+                switch (dataType.ToLower())
+                {
+                    case "integer":
+                        type = typeof(int);
+                        break;
+                }
+
+                if (type != null)
+                {
+                    tuple.Property.Type = new CodeTypeReference(type);
+
+                    var fieldName = GetPropertyFieldName(tuple.Property);
+                    if (fieldsDict.TryGetValue(fieldName, out var field))
+                    {
+                        field.Type = new CodeTypeReference(type);
+                    }
+
+                    tuple.DataTypeAttribute.Arguments.Remove(dataTypeArgument);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Generates the automatic properties.
+        /// </summary>
+        /// <param name="codeType">Represents a type declaration for a class, structure, interface, or enumeration.</param>
+        private void GenerateAutomaticProperties(CodeTypeDeclaration codeType)
+        {
+            if (Options.Language == XsdCodeGeneratorOutputLanguage.CS && 
+                Options.GenerateAutoProperty != XsdCodeGeneratorAutoPropertyType.None &&
+                !Options.EnableDataBinding)
+            {
+                var indentString = new string(' ', 8);
+
+                var constructor = codeType.Members
+                    .OfType<CodeConstructor>()
+                    .FirstOrDefault();
+
+                var fieldsDictionary = codeType.Members
+                    .OfType<CodeMemberField>()
+                    .ToDictionary(fld => fld.Name, fld => fld);
+
+                var properties = codeType.Members
+                    .OfType<CodeMemberProperty>()
+                    .ToList();
+
+                foreach (var property in properties)
+                {
+                    //if (property.Type.ArrayElementType != null)
+                    //    continue;
+
+                    var fieldName = GetPropertyFieldName(property);
+
+                    CodeMemberField field = null;
+                    if (!string.IsNullOrEmpty(fieldName))
+                        fieldsDictionary.TryGetValue(fieldName, out field);
+
+                    var cm = new CodeSnippetTypeMember();
+                    var transformToAutoProperty = true;
+
+                    var attributesString = new List<string>();
+
+                    foreach (var attribute in property.CustomAttributes.OfType<CodeAttributeDeclaration>())
+                    {
+                        // Don't transform property with default value.
+                        if (attribute.Name == "System.ComponentModel.DefaultValueAttribute")
+                        {
+                            transformToAutoProperty = false;
+                        }
+                        else
+                        {
+                            string attributesArguments = string.Empty;
+                            foreach (var arg in attribute.Arguments)
+                            {
+                                if (arg is CodeAttributeArgument argument)
+                                {
+                                    attributesArguments += AttributeArgumentToString(argument) + ",";
+                                }
+                            }
+
+                            // Remove last ","
+                            if (attributesArguments.Length > 0)
+                                attributesArguments = attributesArguments.Remove(attributesArguments.Length - 1);
+
+                            attributesString.Add($"[{attribute.Name}({attributesArguments})]");
+                        }
+                    }
+
+                    if (!transformToAutoProperty) continue;
+
+                    foreach (var attribute in attributesString)
+                    {
+                        cm.Text += indentString + attribute + "\n";
+                    }
+
+                    var ct = new CodeTypeReferenceExpression(property.Type);
+                    var prop = ExpressionToString(ct);
+
+                    string assignStatementString = string.Empty;
+
+                    if (Options.GenerateAutoProperty == XsdCodeGeneratorAutoPropertyType.AssignInline 
+                        && field != null 
+                        && constructor != null)
+                    {
+                        var assignStatement = constructor.Statements
+                            .OfType<CodeAssignStatement>()
+                            .FirstOrDefault(s => field.Name == (s.Left as CodeFieldReferenceExpression)?.FieldName);
+
+                        if (assignStatement != null)
+                        {
+                            constructor.Statements.Remove(assignStatement);
+                            assignStatementString = " = " + ExpressionToString(assignStatement.Right) + ";";
+                        }
+                    }
+                
+                    var text = $"{indentString}public {prop} {property.Name} {{ get; set; }}{assignStatementString}\n";
+                    cm.Text += text;
+                    cm.Comments.AddRange(property.Comments);
+
+                    codeType.Members.Add(cm);
+                    codeType.Members.Remove(property);
+                    if(field != null) codeType.Members.Remove(field);
+                }
+
+                if (constructor != null && constructor.Statements.Count == 0)
+                {
+                    codeType.Members.Remove(constructor);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Get corresponding backing field name for a property
+        /// </summary>
+        /// <param name="property"></param>
+        /// <returns></returns>
+        private static string GetPropertyFieldName(CodeMemberProperty property)
+        {
+            var getterExpression = property
+                .GetStatements
+                .OfType<CodeMethodReturnStatement>()
+                .FirstOrDefault()
+                ?.Expression as CodeFieldReferenceExpression;
+
+            var fieldName = getterExpression?.FieldName;
+            return fieldName;
+        }
+
+        /// <summary>
+        /// Outputs the attribute argument.
+        /// </summary>
+        /// <param name="arg">Represents an argument used in a metadata attribute declaration.</param>
+        /// <returns>transform attribute into string</returns>
+        private string AttributeArgumentToString(CodeAttributeArgument arg)
+        {
+            var stringWriter = new StringWriter();
+            var provider = GetCodeDomProvider(Options.Language);
+
+            if (!string.IsNullOrEmpty(arg.Name))
+            {
+                stringWriter.Write(arg.Name);
+                stringWriter.Write("=");
+            }
+
+            provider.GenerateCodeFromExpression(arg.Value, stringWriter, new CodeGeneratorOptions());
+            var stringReader = new StringReader(stringWriter.ToString());
+            return stringReader.ReadToEnd();
+        }
+
+        /// <summary>
+        /// Outputs the attribute argument.
+        /// </summary>
+        /// <param name="arg">Represents an argument used in a metadata attribute declaration.</param>
+        /// <returns>transform attribute into string</returns>
+        private string ExpressionToString(CodeExpression arg)
+        {
+            var stringWriter = new StringWriter();
+            var provider = GetCodeDomProvider(Options.Language);
+            provider.GenerateCodeFromExpression(arg, stringWriter, new CodeGeneratorOptions());
+            var stringReader = new StringReader(stringWriter.ToString());
+            return stringReader.ReadToEnd();
+        }
+
+        private CodeDomProvider GetCodeDomProvider(XsdCodeGeneratorOutputLanguage language)
+        {
+            // output the C# code
+            CodeDomProvider codeProvider;
+            switch (language)
+            {
+                case XsdCodeGeneratorOutputLanguage.VB:
+                    codeProvider = new VBCodeProvider();
+                    break;
+                default:
+                    codeProvider = new CSharpCodeProvider();
+                    break;
+            }
+
+            return codeProvider;
         }
     }
 }

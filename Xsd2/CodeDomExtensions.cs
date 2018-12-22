@@ -10,7 +10,7 @@ namespace Xsd2
         {
             "System.Xml.Serialization.XmlAttributeAttribute",
             "System.Xml.Serialization.XmlElementAttribute",
-            "System.Xml.Serialization.XmlArrayItemAttribute",
+            //"System.Xml.Serialization.XmlArrayItemAttribute",
             "System.Xml.Serialization.XmlEnumAttribute",
             "System.Xml.Serialization.XmlRootAttribute",
             "System.Xml.Serialization.XmlTypeAttribute"
